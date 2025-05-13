@@ -12,20 +12,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(libretro-common)
 
-# # Declare GLFW
-# FetchContent_Declare(
-#     glfw
-#     GIT_REPOSITORY https://github.com/glfw/glfw.git
-#     GIT_TAG 3.4
-# )
-# FetchContent_MakeAvailable(glfw)
-
-# # Configure GLFW options
-# set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-# set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-# set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-
-# Declare GLAD
+# Fetch GLAD
 FetchContent_Declare(
     glad
     GIT_REPOSITORY https://github.com/Dav1dde/glad.git
@@ -38,34 +25,21 @@ set(GLAD_PROFILE "core" CACHE STRING "OpenGL profile")
 set(GLAD_API "gl=3.3" CACHE STRING "API type/version")
 set(GLAD_GENERATOR "c" CACHE STRING "Language to generate")
 
-# Add GLAD library
-# add_subdirectory(${glad_SOURCE_DIR} ${glad_BINARY_DIR})
-
-# Create executable
-# add_executable(simple_triangle src/main.c)
-
-# Link libraries
-# target_link_libraries(simple_triangle PRIVATE glfw glad)
-
-# Include directories for GLAD
-# target_include_directories(simple_triangle PRIVATE 
-#   ${glad_SOURCE_DIR}/include
-# )
-
-# add_executable(simple_trianglepp src/main.cpp)
-# target_link_libraries(simple_trianglepp PRIVATE glfw glad)
-# target_include_directories(simple_trianglepp PRIVATE ${glad_SOURCE_DIR}/include)
+# Option to enable/disable OpenGL
+option(USE_OPENGL "Enable OpenGL for hardware rendering" ON)
 
 # Define the shared library
 add_library(hello_world_core SHARED 
-  src/lib.c 
-  # src/font.h
+    src/lib.c
 )
 
+# Link libraries
 target_link_libraries(hello_world_core PRIVATE 
-  glad
+    glad
 )
-
+if(WIN32 AND USE_OPENGL)
+    target_link_libraries(hello_world_core PRIVATE opengl32)
+endif()
 
 # Set include directories
 target_include_directories(hello_world_core PRIVATE
@@ -78,6 +52,9 @@ target_include_directories(hello_world_core PRIVATE
 target_compile_definitions(hello_world_core PRIVATE
     _CRT_SECURE_NO_WARNINGS
 )
+if(USE_OPENGL)
+    target_compile_definitions(hello_world_core PRIVATE USE_OPENGL)
+endif()
 
 # Ensure the output is a .dll with no prefix
 set_target_properties(hello_world_core PROPERTIES

@@ -3,14 +3,9 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdarg.h>
+#ifdef USE_OPENGL
 #include <glad/glad.h>
-
-// Stub font.h if not available
-#ifndef FONT_H
-#define FONT_H
-static const uint8_t *font_8x8[95] = {0}; // Dummy to allow compilation
 #endif
-#include "font.h"
 
 // Framebuffer dimensions
 #define WIDTH 320
@@ -27,21 +22,23 @@ static retro_input_state_t input_state_cb;
 static retro_hw_get_current_framebuffer_t get_current_framebuffer;
 static bool initialized = false;
 static bool contentless_set = false;
+static bool pixel_format_set = false;
 static int env_call_count = 0;
 static FILE *log_file = NULL;
-static int square_x = 0;
-static int square_y = 0;
-static GLuint font_texture = 0;
-static GLuint shader_program = 0;
+#ifdef USE_OPENGL
 static GLuint solid_shader_program = 0;
 static GLuint vbo, vao;
 static bool gl_initialized = false;
-static bool use_default_fbo = false; // Toggle for debugging
+static bool use_default_fbo = true; // Force default FBO for HW rendering
+#endif
+// static bool use_software_rendering = true; // Enable software rendering
+static bool use_software_rendering = false; // Enable software rendering
+static uint16_t framebuffer[WIDTH * HEIGHT]; // For RGB565 or 0RGB1555
 
 // File-based logging
 static void fallback_log(const char *level, const char *msg) {
    if (!log_file) {
-      log_file = fopen("core.log", "a"); // Append mode
+      log_file = fopen("core.log", "a");
       if (!log_file) {
          fprintf(stderr, "[ERROR] Failed to open core.log\n");
          return;
@@ -73,6 +70,7 @@ static void fallback_log_format(const char *level, const char *fmt, ...) {
    va_end(args);
 }
 
+#ifdef USE_OPENGL
 // Check OpenGL errors
 static void check_gl_error(const char *context) {
    GLenum err;
@@ -179,6 +177,12 @@ static void init_opengl(void) {
       return;
    }
 
+   const char *gl_version = (const char *)glGetString(GL_VERSION);
+   if (log_cb)
+      log_cb(RETRO_LOG_INFO, "[DEBUG] OpenGL version: %s", gl_version ? gl_version : "unknown");
+   else
+      fallback_log_format("DEBUG", "OpenGL version: %s", gl_version ? gl_version : "unknown");
+
    // Create solid color shader program
    solid_shader_program = create_shader_program(solid_vertex_shader_src, solid_fragment_shader_src, "Solid");
    if (!solid_shader_program) {
@@ -233,20 +237,32 @@ static void deinit_opengl(void) {
 
 // Draw a solid quad
 static void draw_solid_quad(float x, float y, float w, float h, float r, float g, float b, float a, float vp_width, float vp_height) {
+   if (!glIsProgram(solid_shader_program)) {
+      if (log_cb)
+         log_cb(RETRO_LOG_ERROR, "[ERROR] Invalid shader program in draw_solid_quad");
+      else
+         fallback_log("ERROR", "Invalid shader program in draw_solid_quad");
+      return;
+   }
+   if (!glIsVertexArray(vao)) {
+      if (log_cb)
+         log_cb(RETRO_LOG_ERROR, "[ERROR] Invalid VAO in draw_solid_quad");
+      else
+         fallback_log("ERROR", "Invalid VAO in draw_solid_quad");
+      return;
+   }
+   if (!glIsBuffer(vbo)) {
+      if (log_cb)
+         log_cb(RETRO_LOG_ERROR, "[ERROR] Invalid VBO in draw_solid_quad");
+      else
+         fallback_log("ERROR", "Invalid VBO in draw_solid_quad");
+      return;
+   }
+
    float x0 = (x / vp_width) * 2.0f - 1.0f;
    float y0 = 1.0f - (y / vp_height) * 2.0f;
    float x1 = ((x + w) / vp_width) * 2.0f - 1.0f;
    float y1 = 1.0f - ((y + h) / vp_height) * 2.0f;
-
-   // Validate vertices
-   if (x0 < -1.0f || x0 > 1.0f || y0 < -1.0f || y0 > 1.0f || x1 < -1.0f || x1 > 1.0f || y1 < -1.0f || y1 > 1.0f) {
-      if (log_cb)
-         log_cb(RETRO_LOG_ERROR, "[ERROR] Invalid vertex coordinates: (%f, %f), (%f, %f), (%f, %f), (%f, %f)",
-                x0, y0, x1, y0, x0, y1, x1, y1);
-      else
-         fallback_log_format("ERROR", "Invalid vertex coordinates: (%f, %f), (%f, %f), (%f, %f), (%f, %f)",
-                            x0, y0, x1, y0, x0, y1, x1, y1);
-   }
 
    float vertices[] = {
       x0, y0,
@@ -265,12 +281,6 @@ static void draw_solid_quad(float x, float y, float w, float h, float r, float g
    check_gl_error("draw_solid_quad glBufferSubData");
 
    GLint color_loc = glGetUniformLocation(solid_shader_program, "color");
-   if (color_loc == -1) {
-      if (log_cb)
-         log_cb(RETRO_LOG_ERROR, "[ERROR] Failed to get color uniform location");
-      else
-         fallback_log("ERROR", "Failed to get color uniform location");
-   }
    glUniform4f(color_loc, r, g, b, a);
    check_gl_error("draw_solid_quad glUniform4f");
 
@@ -283,12 +293,13 @@ static void draw_solid_quad(float x, float y, float w, float h, float r, float g
    check_gl_error("draw_solid_quad cleanup");
 
    if (log_cb)
-      log_cb(RETRO_LOG_DEBUG, "[DEBUG] Drew solid quad at (%f, %f), size (%f, %f), vertices: (%f, %f), (%f, %f), (%f, %f), (%f, %f), vp: %fx%f",
-             x, y, w, h, x0, y0, x1, y0, x0, y1, x1, y1, vp_width, vp_height);
+      log_cb(RETRO_LOG_DEBUG, "[DEBUG] Drew solid quad at (%f, %f), size (%f, %f), vp: %fx%f",
+             x, y, w, h, vp_width, vp_height);
    else
-      fallback_log_format("DEBUG", "Drew solid quad at (%f, %f), size (%f, %f), vertices: (%f, %f), (%f, %f), (%f, %f), (%f, %f), vp: %fx%f",
-                         x, y, w, h, x0, y0, x1, y0, x0, y1, x1, y1, vp_width, vp_height);
+      fallback_log_format("DEBUG", "Drew solid quad at (%f, %f), size (%f, %f), vp: %fx%f",
+                         x, y, w, h, vp_width, vp_height);
 }
+#endif
 
 // Set environment
 void retro_set_environment(retro_environment_t cb) {
@@ -376,16 +387,17 @@ void retro_init(void) {
 
 // Deinitialize core
 void retro_deinit(void) {
+#ifdef USE_OPENGL
    deinit_opengl();
+#endif
    if (log_file) {
       fclose(log_file);
       log_file = NULL;
    }
    initialized = false;
    contentless_set = false;
+   pixel_format_set = false;
    env_call_count = 0;
-   square_x = 0;
-   square_y = 0;
    if (log_cb)
       log_cb(RETRO_LOG_INFO, "[DEBUG] Core deinitialized");
    else
@@ -434,8 +446,6 @@ void retro_set_controller_port_device(unsigned port, unsigned device) {
 
 // Reset core
 void retro_reset(void) {
-   square_x = 0;
-   square_y = 0;
    if (log_cb)
       log_cb(RETRO_LOG_INFO, "[DEBUG] Core reset");
    else
@@ -453,36 +463,82 @@ bool retro_load_game(const struct retro_game_info *game) {
       return false;
    }
 
-   // Set OpenGL context
-   struct retro_hw_render_callback hw_render = {
-      .context_type = RETRO_HW_CONTEXT_OPENGL_CORE,
-      .version_major = 3,
-      .version_minor = 3,
-      .context_reset = init_opengl,
-      .context_destroy = deinit_opengl,
-      .get_current_framebuffer = NULL,
-      .bottom_left_origin = true,
-      .depth = true,
-      .stencil = false,
-      .cache_context = false,
-      .debug_context = true // Enable debug for better GL error reporting
-   };
-   if (!environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
-      if (log_cb)
-         log_cb(RETRO_LOG_ERROR, "[ERROR] Failed to set OpenGL context in retro_load_game");
-      else
-         fallback_log("ERROR", "Failed to set OpenGL context in retro_load_game");
-      return false;
-   }
+   if (use_software_rendering) {
+      if (!pixel_format_set) {
+         enum retro_pixel_format pixel_format = RETRO_PIXEL_FORMAT_RGB565;
+         //enum retro_pixel_format pixel_format = RETRO_PIXEL_FORMAT_0RGB1555; // Uncomment to test 0RGB1555
+         int retries = 3;
+         while (retries > 0) {
+            if (environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &pixel_format)) {
+               pixel_format_set = true;
+               if (log_cb)
+                  log_cb(RETRO_LOG_INFO, "[DEBUG] Pixel format set to %s in retro_load_game",
+                         pixel_format == RETRO_PIXEL_FORMAT_RGB565 ? "RGB565" : "0RGB1555");
+               else
+                  fallback_log("DEBUG", pixel_format == RETRO_PIXEL_FORMAT_RGB565 ? "Pixel format set to RGB565 in retro_load_game" : "Pixel format set to 0RGB1555 in retro_load_game");
+               break;
+            }
+            retries--;
+            if (log_cb)
+               log_cb(RETRO_LOG_WARN, "[WARN] Failed to set pixel format to %s, retries left: %d",
+                      pixel_format == RETRO_PIXEL_FORMAT_RGB565 ? "RGB565" : "0RGB1555", retries);
+            else
+               fallback_log_format("WARN", "Failed to set pixel format to %s, retries left: %d",
+                                  pixel_format == RETRO_PIXEL_FORMAT_RGB565 ? "RGB565" : "0RGB1555", retries);
+         }
+         if (!pixel_format_set) {
+            if (log_cb)
+               log_cb(RETRO_LOG_ERROR, "[ERROR] Failed to set pixel format to %s after retries",
+                      pixel_format == RETRO_PIXEL_FORMAT_RGB565 ? "RGB565" : "0RGB1555");
+            else
+               fallback_log("ERROR", pixel_format == RETRO_PIXEL_FORMAT_RGB565 ? "Failed to set pixel format to RGB565 after retries" : "Failed to set pixel format to 0RGB1555 after retries");
+            return false;
+         }
+      } else {
+         if (log_cb)
+            log_cb(RETRO_LOG_DEBUG, "[DEBUG] Pixel format already set, skipping");
+         else
+            fallback_log("DEBUG", "Pixel format already set, skipping");
+      }
+   } else {
+#ifdef USE_OPENGL
+      // Set OpenGL context
+      struct retro_hw_render_callback hw_render = {
+         .context_type = RETRO_HW_CONTEXT_OPENGL_CORE,
+         .version_major = 3,
+         .version_minor = 3,
+         .context_reset = init_opengl,
+         .context_destroy = deinit_opengl,
+         .get_current_framebuffer = NULL,
+         .bottom_left_origin = true,
+         .depth = true,
+         .stencil = false,
+         .cache_context = false,
+         .debug_context = true
+      };
+      if (!environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) {
+         if (log_cb)
+            log_cb(RETRO_LOG_ERROR, "[ERROR] Failed to set OpenGL context in retro_load_game");
+         else
+            fallback_log("ERROR", "Failed to set OpenGL context in retro_load_game");
+         return false;
+      }
 
-   // Store get_current_framebuffer callback
-   get_current_framebuffer = hw_render.get_current_framebuffer;
-   if (!get_current_framebuffer) {
-      if (log_cb)
-         log_cb(RETRO_LOG_ERROR, "[ERROR] No get_current_framebuffer callback provided");
-      else
-         fallback_log("ERROR", "No get_current_framebuffer callback provided");
-      return false;
+      // Store and validate get_current_framebuffer callback
+      get_current_framebuffer = hw_render.get_current_framebuffer;
+      if (!get_current_framebuffer) {
+         if (log_cb)
+            log_cb(RETRO_LOG_ERROR, "[ERROR] No get_current_framebuffer callback provided, will use default framebuffer");
+         else
+         fallback_log("ERROR", "No get_current_framebuffer callback provided, will use default framebuffer");
+         use_default_fbo = true;
+      } else {
+         if (log_cb)
+            log_cb(RETRO_LOG_INFO, "[DEBUG] get_current_framebuffer callback set successfully");
+         else
+         fallback_log("DEBUG", "get_current_framebuffer callback set successfully");
+      }
+#endif
    }
 
    if (log_cb)
@@ -494,129 +550,155 @@ bool retro_load_game(const struct retro_game_info *game) {
 
 // Run frame
 void retro_run(void) {
-   // Force logging to ensure execution
-   if (log_cb)
+   if (log_cb) {
       log_cb(RETRO_LOG_DEBUG, "[DEBUG] Entering retro_run");
-   fallback_log("DEBUG", "Entering retro_run");
+      log_cb(RETRO_LOG_DEBUG, "[DEBUG] Flushing logs");
+   } else {
+      fallback_log("DEBUG", "Entering retro_run");
+      fallback_log("DEBUG", "Flushing logs");
+   }
 
-   if (!initialized || !gl_initialized) {
+   if (!initialized) {
       if (log_cb)
-         log_cb(RETRO_LOG_ERROR, "[ERROR] Core or OpenGL not initialized in retro_run (initialized=%d, gl_initialized=%d)",
-                initialized, gl_initialized);
+         log_cb(RETRO_LOG_ERROR, "[ERROR] Core not initialized, exiting retro_run");
       else
-         fallback_log_format("ERROR", "Core or OpenGL not initialized in retro_run (initialized=%d, gl_initialized=%d)",
-                            initialized, gl_initialized);
+         fallback_log("ERROR", "Core not initialized, exiting retro_run");
       return;
    }
-   fallback_log("DEBUG", "ASD");
 
-   // Handle input
-   if (input_poll_cb) {
-      input_poll_cb();
-      if (log_cb)
-         log_cb(RETRO_LOG_DEBUG, "[DEBUG] Input polled");
-      else
-         fallback_log("DEBUG", "Input polled");
-   }
-   if (input_state_cb) {
-      if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT)) {
-         square_x += 1;
-         if (square_x > WIDTH - 20) square_x = WIDTH - 20;
-      }
-      if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT)) {
-         square_x -= 1;
-         if (square_x < 0) square_x = 0;
-      }
-      if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN)) {
-         square_y += 1;
-         if (square_y > HEIGHT - 20) square_y = HEIGHT - 20;
-      }
-      if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP)) {
-         square_y -= 1;
-         if (square_y < 0) square_y = 0;
-      }
-      if (log_cb)
-         log_cb(RETRO_LOG_DEBUG, "[DEBUG] Input processed, square at (%d, %d)", square_x, square_y);
-      else
-         fallback_log_format("DEBUG", "Input processed, square at (%d, %d)", square_x, square_y);
-   }
+   if (use_software_rendering) {
+      // Software rendering: Fill framebuffer with green (RGB565 or 0RGB1555)
+      for (int i = 0; i < WIDTH * HEIGHT; i++)
+         framebuffer[i] = 0x07E0; // Green in RGB565 (5-6-5)
+         //framebuffer[i] = 0x7C00; // Green in 0RGB1555 (5-5-5), uncomment if testing 0RGB1555
 
-   // Bind framebuffer
-   GLuint fbo = 0;
-   fallback_log("DEBUG", "ffff");
-   if (use_default_fbo) {
-    fallback_log("DEBUG", "GL_FRAMEBUFFER");
+      if (video_cb) {
+         video_cb(framebuffer, WIDTH, HEIGHT, WIDTH * sizeof(uint16_t));
+         if (log_cb)
+            log_cb(RETRO_LOG_DEBUG, "[DEBUG] Frame presented (software)");
+         else
+            fallback_log("DEBUG", "Frame presented (software)");
+      } else {
+         if (log_cb)
+            log_cb(RETRO_LOG_ERROR, "[ERROR] No video callback set, exiting retro_run");
+         else
+            fallback_log("ERROR", "No video callback set, exiting retro_run");
+         return;
+      }
+   } else {
+#ifdef USE_OPENGL
+      if (!gl_initialized) {
+         if (log_cb)
+            log_cb(RETRO_LOG_ERROR, "[ERROR] OpenGL not initialized, exiting retro_run");
+         else
+            fallback_log("ERROR", "OpenGL not initialized, exiting retro_run");
+         return;
+      }
+
+      // Validate shader program
+      if (!glIsProgram(solid_shader_program)) {
+         if (log_cb)
+            log_cb(RETRO_LOG_ERROR, "[ERROR] Solid shader program is invalid, exiting retro_run");
+         else
+            fallback_log("ERROR", "Solid shader program is invalid, exiting retro_run");
+         return;
+      }
+
+      // Validate VAO and VBO
+      if (!glIsVertexArray(vao)) {
+         if (log_cb)
+            log_cb(RETRO_LOG_ERROR, "[ERROR] Invalid VAO, exiting retro_run");
+         else
+            fallback_log("ERROR", "Invalid VAO, exiting retro_run");
+         return;
+      }
+      if (!glIsBuffer(vbo)) {
+         if (log_cb)
+            log_cb(RETRO_LOG_ERROR, "[ERROR] Invalid VBO, exiting retro_run");
+         else
+         fallback_log("ERROR", "Invalid VBO, exiting retro_run");
+         return;
+      }
+
+      // Log GL state
+      const char *gl_version = (const char *)glGetString(GL_VERSION);
+      if (log_cb)
+         log_cb(RETRO_LOG_DEBUG, "[DEBUG] Current OpenGL version: %s", gl_version ? gl_version : "unknown");
+      else
+         fallback_log_format("DEBUG", "Current OpenGL version: %s", gl_version ? gl_version : "unknown");
+
+      // Bind framebuffer
+      GLuint fbo = 0;
+      if (use_default_fbo || !get_current_framebuffer) {
+         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+         if (log_cb)
+            log_cb(RETRO_LOG_WARN, "[WARN] Using default framebuffer %s",
+                   get_current_framebuffer ? "due to use_default_fbo" : "because get_current_framebuffer is NULL");
+         else
+         fallback_log("WARN", get_current_framebuffer ? "Using default framebuffer due to use_default_fbo" : "Using default framebuffer because get_current_framebuffer is NULL");
+      } else {
+         fbo = (GLuint)(uintptr_t)(get_current_framebuffer());
+         if (fbo == 0) {
+            if (log_cb)
+               log_cb(RETRO_LOG_ERROR, "[ERROR] get_current_framebuffer returned 0, using default framebuffer");
+            else
+               fallback_log("ERROR", "get_current_framebuffer returned 0, using default framebuffer");
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            use_default_fbo = true;
+         } else {
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+            if (status != GL_FRAMEBUFFER_COMPLETE) {
+               if (log_cb)
+                  log_cb(RETRO_LOG_ERROR, "[ERROR] Framebuffer incomplete: %d, using default framebuffer", status);
+               else
+                  fallback_log_format("ERROR", "Framebuffer incomplete: %d, using default framebuffer", status);
+               glBindFramebuffer(GL_FRAMEBUFFER, 0);
+               use_default_fbo = true;
+            } else {
+               GLint color_attachment;
+               glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &color_attachment);
+               if (log_cb)
+                  log_cb(RETRO_LOG_DEBUG, "[DEBUG] Binding FBO: %u, color attachment: %d", fbo, color_attachment);
+               else
+                  fallback_log_format("DEBUG", "Binding FBO: %u, color attachment: %d", fbo, color_attachment);
+            }
+         }
+      }
+      check_gl_error("framebuffer binding");
+
+      // Clear framebuffer
+      glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+      check_gl_error("glClear");
+
+      // Set viewport
+      float vp_width = HW_WIDTH;
+      float vp_height = HW_HEIGHT;
+      glViewport(0, 0, (GLint)vp_width, (GLint)vp_height);
+      check_gl_error("glViewport");
+
+      // Draw full-screen green quad
+      draw_solid_quad(0.0f, 0.0f, vp_width, vp_height, 0.0f, 1.0f, 0.0f, 1.0f, vp_width, vp_height);
+
+      // Unbind FBO
       glBindFramebuffer(GL_FRAMEBUFFER, 0);
-      if (log_cb)
-         log_cb(RETRO_LOG_WARN, "[WARN] Using default framebuffer for debugging");
-      else
-         fallback_log("WARN", "Using default framebuffer for debugging");
-   } else if (!get_current_framebuffer) {
-    fallback_log("DEBUG", "!get_current_framebuffer");
-      if (log_cb)
-         log_cb(RETRO_LOG_ERROR, "[ERROR] get_current_framebuffer is NULL");
-      else
-         fallback_log("ERROR", "get_current_framebuffer is NULL");
-      return;
-   } else {
-    fallback_log("DEBUG", "get_current_framebuffer()");
-      // fbo = (GLuint)(uintptr_t)(get_current_framebuffer());
-      fbo = (GLuint)(uintptr_t)(get_current_framebuffer);
-      if (fbo == 0) {
+      check_gl_error("unbind framebuffer");
+
+      // Present frame
+      if (video_cb) {
+         video_cb(NULL, WIDTH, HEIGHT, 0);
          if (log_cb)
-            log_cb(RETRO_LOG_ERROR, "[ERROR] get_current_framebuffer returned 0");
+            log_cb(RETRO_LOG_DEBUG, "[DEBUG] Frame presented");
          else
-            fallback_log("ERROR", "get_current_framebuffer returned 0");
+            fallback_log("DEBUG", "Frame presented");
+      } else {
+         if (log_cb)
+            log_cb(RETRO_LOG_ERROR, "[ERROR] No video callback set, exiting retro_run");
+         else
+         fallback_log("ERROR", "No video callback set, exiting retro_run");
          return;
       }
-      glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-      GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-      if (status != GL_FRAMEBUFFER_COMPLETE) {
-         if (log_cb)
-            log_cb(RETRO_LOG_ERROR, "[ERROR] Framebuffer incomplete: %d", status);
-         else
-            fallback_log_format("ERROR", "Framebuffer incomplete: %d", status);
-         return;
-      }
-      // Log FBO details
-      GLint color_attachment;
-      glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &color_attachment);
-      if (log_cb)
-         log_cb(RETRO_LOG_DEBUG, "[DEBUG] Binding FBO: %u, color attachment: %d", fbo, color_attachment);
-      else
-         fallback_log_format("DEBUG", "Binding FBO: %u, color attachment: %d", fbo, color_attachment);
-   }
-   check_gl_error("framebuffer binding");
-
-   // Render
-   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-   check_gl_error("glClear");
-
-   // Use HW render size
-   float vp_width = HW_WIDTH;
-   float vp_height = HW_HEIGHT;
-   glViewport(0, 0, (GLint)vp_width, (GLint)vp_height);
-   check_gl_error("glViewport");
-
-   // Draw full-screen green quad
-   draw_solid_quad(0.0f, 0.0f, vp_width, vp_height, 0.0f, 1.0f, 0.0f, 1.0f, vp_width, vp_height);
-
-   // Unbind FBO
-   glBindFramebuffer(GL_FRAMEBUFFER, 0);
-   check_gl_error("unbind framebuffer");
-
-   // Present frame
-   if (video_cb) {
-      video_cb(NULL, WIDTH, HEIGHT, 0);
-      if (log_cb)
-         log_cb(RETRO_LOG_DEBUG, "[DEBUG] Frame presented");
-      else
-         fallback_log("DEBUG", "Frame presented");
-   } else {
-      if (log_cb)
-         log_cb(RETRO_LOG_ERROR, "[ERROR] No video callback set");
-      else
-         fallback_log("ERROR", "No video callback set");
+#endif
    }
 
    if (log_cb)

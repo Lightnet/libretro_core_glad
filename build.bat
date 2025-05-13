@@ -2,6 +2,7 @@
 setlocal
 if not exist build mkdir build
 cd build
-cmake .. -DCMAKE_BUILD_TYPE=Debug
+@REM cmake .. -DCMAKE_BUILD_TYPE=Debug -DUSE_OPENGL=OFF
+cmake .. -DCMAKE_BUILD_TYPE=Debug -DUSE_OPENGL=ON
 cmake --build . --config Debug
 endlocal
