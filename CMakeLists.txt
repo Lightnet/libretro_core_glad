@@ -16,7 +16,7 @@ FetchContent_MakeAvailable(glad)
 set(GLAD_PROFILE "core" CACHE STRING "OpenGL profile")
 set(GLAD_API "gl=3.3" CACHE STRING "API type/version")
 set(GLAD_GENERATOR "c" CACHE STRING "Language to generate")
-# testing
+# testing for opengl and software render toggle
 set(USE_OPENGL ON)
 # hello_world_core library
 add_library(hello_world_core SHARED src/lib.c)
